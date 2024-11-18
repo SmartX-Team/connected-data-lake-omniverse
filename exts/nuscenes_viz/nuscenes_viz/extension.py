@@ -1,10 +1,14 @@
 '''An Omniverse Kit Extension module for nuScenes Visualization
 '''
-
+import asyncio
 from logging import info, warning
 
 from typing_extensions import final, override
-from pxr import Sdf
+from pxr import Sdf, Gf, Usd
+#from usdrt import Sdf, Gf, Usd
+import numpy as np 
+from concurrent.futures import ThreadPoolExecutor
+
 
 import omni.ext  # pylint: disable=import-error
 import omni.kit.commands  # pylint: disable=import-error
@@ -18,7 +22,7 @@ try:
 except ImportError as e:
     raise e
 
-from cdlake import Cdl  # pylint: disable=import-error
+from cdlake import Cdl  # pylint: disable=import-error	
 
 from .dataloader import BaseDataLoader, Category, load_dataset
 
@@ -46,13 +50,13 @@ class RGBLiDARVisualizerExtension(omni.ext.IExt):
     _window_control_panel: ui.Window | None
 
     # States
-    _cache_dir: str = './cache'
-    _cdl: Cdl
+    _cache_dir: str = './cache'	
+    _cdl: Cdl	
     _data_category: Category = 'samples'
     _data_loader: BaseDataLoader | None = None
     _data_loader_url: str = ''
-    _dataset_catalog_index_local: int = 0
-    _dataset_catalog_index_custom: int = 1
+    _dataset_catalog_index_local: int = 0	
+    _dataset_catalog_index_custom: int = 1	
     _datasets: list[str] = []
 
     @final
@@ -60,8 +64,9 @@ class RGBLiDARVisualizerExtension(omni.ext.IExt):
     def on_startup(self, _ext_id: str) -> None:
         '''Initialize the extension'''
         info('[RGBLiDARVisualizer] Extension started')
-        
-        # Define Connected Data Lake
+        print(omni.kit.commands.get_commands_list())
+
+        # Define Connected Data Lake	
         self._cdl = Cdl()
 
         # Define camera windows
@@ -95,6 +100,31 @@ class RGBLiDARVisualizerExtension(omni.ext.IExt):
                 self._ui_timestamp_slider = ui.IntSlider(
                     model=ui.SimpleIntModel(),
                 )
+                
+                self._loop_running = False
+
+                self.play_button = ui.Button("Play", clicked_fn=lambda: asyncio.ensure_future(clicked()))
+
+                async def clicked():
+                    if self._loop_running:
+                        self._loop_running = False
+                        self.play_button.text = "Play"
+                    else:
+                        self._loop_running = True
+                        self.play_button.text = "Stop"
+
+                        if self._data_loader is not None:
+                            for x in self._data_loader.timestamps:
+                                if x % 500000 == 0:
+                                    if not self._loop_running:
+                                        break
+                                    self._ui_timestamp_slider.model.set_value(x)
+                                    #self._reload_screen()
+                                    self._on_timestamp_changed(self._ui_timestamp_slider.model)
+                                    await asyncio.sleep(0.5)
+                            self._loop_running = False
+                            self.play_button.text = "Play"
+
 
                 # Instructions
                 ui.Label(
@@ -103,8 +133,8 @@ class RGBLiDARVisualizerExtension(omni.ext.IExt):
                 )
 
                 # Register callbacks
-                self._ui_dataset_catalog.model.add_item_changed_fn(
-                    self._on_dataset_catalog_changed,
+                self._ui_dataset_catalog.model.add_item_changed_fn(	
+                    self._on_dataset_catalog_changed,	
                 )
                 self._ui_dataset.model.add_end_edit_fn(
                     self._on_dataset_changed,
@@ -121,7 +151,6 @@ class RGBLiDARVisualizerExtension(omni.ext.IExt):
 
                 # Fetch dataset
                 self._reload_dataset_catalog()
-
     @ final
     @ override
     def on_shutdown(self) -> None:
@@ -149,32 +178,32 @@ class RGBLiDARVisualizerExtension(omni.ext.IExt):
             image = ui.Image('')
         self._ui_cameras[name] = image
 
-    def _reload_dataset_catalog(self) -> None:
-        # Reload catalog
-        self._datasets = ['dataset-b', 'dataset-a']
+    def _reload_dataset_catalog(self) -> None:	
+        # Reload catalog	
+        self._datasets = ['dataset-b', 'dataset-a']	
 
-        # Reload catalog UI
-        for dataset in self._ui_dataset_catalog.model.get_item_children():
-            self._ui_dataset_catalog.model.remove_item(dataset)
-        if self._data_loader is not None:
-            for dataset in self._datasets:
-                self._ui_dataset_catalog.model.append_child_item(
-                    None,
-                    ui.SimpleStringModel(dataset),
-                )
-            
-            self._dataset_catalog_index_local = len(self._datasets)
-            self._ui_dataset_catalog.model.append_child_item(
-                None,
-                ui.SimpleStringModel('Local Filesystem'),
-            )
-            self._dataset_catalog_index_custom = len(self._datasets) + 1
-            self._ui_dataset_catalog.model.append_child_item(
-                None,
-                ui.SimpleStringModel('Custom'),
-            )
+        # Reload catalog UI	
+        for dataset in self._ui_dataset_catalog.model.get_item_children():	
+            self._ui_dataset_catalog.model.remove_item(dataset)	
+        if self._data_loader is not None:	
+            for dataset in self._datasets:	
+                self._ui_dataset_catalog.model.append_child_item(	
+                    None,	
+                    ui.SimpleStringModel(dataset),	
+                )	
 
-        # Reload dataset
+            self._dataset_catalog_index_local = len(self._datasets)	
+            self._ui_dataset_catalog.model.append_child_item(	
+                None,	
+                ui.SimpleStringModel('Local Filesystem'),	
+            )	
+            self._dataset_catalog_index_custom = len(self._datasets) + 1	
+            self._ui_dataset_catalog.model.append_child_item(	
+                None,	
+                ui.SimpleStringModel('Custom'),	
+            )	
+
+        # Reload dataset	
         return self._reload_dataset()
 
     def _reload_dataset(self) -> None:
@@ -204,6 +233,11 @@ class RGBLiDARVisualizerExtension(omni.ext.IExt):
             self._ui_timestamp_slider.model.set_value(
                 self._data_loader.timestamp,
             )
+            # Sample global timestamps for caching
+            self._global_sampled_ts = self.sample_timestamps(timestamps, num_samples=100)
+
+            # Run caching asynchronously
+            asyncio.run(self.cache_timestamps_async(self._global_sampled_ts))
 
         # Reload the screen
         return self._reload_screen()
@@ -226,22 +260,22 @@ class RGBLiDARVisualizerExtension(omni.ext.IExt):
                     timestamp=lookup_timestamp,
                 )
 
-    def _on_dataset_catalog_changed(self, model, *_args) -> None:
-        # # Propagate value to the DataLoader
-        index = model.get_item_value_model().as_int
-        if self._data_loader is None:
-            return  # nothing changed
-        
-        if index < len(self._datasets):
-            url = f's3://{self._datasets[index]}'
-        elif index == self._dataset_catalog_index_local:
-            url = './data/nuscenes'
-        else:
-            self._ui_dataset.visible = True
-            return
+    def _on_dataset_catalog_changed(self, model, *_args) -> None:	
+        # # Propagate value to the DataLoader	
+        index = model.get_item_value_model().as_int	
+        if self._data_loader is None:	
+            return  # nothing changed	
 
-        self._ui_dataset.visible = False
-        self._ui_dataset.model.set_value(url)
+        if index < len(self._datasets):	
+            url = f's3://{self._datasets[index]}'	
+        elif index == self._dataset_catalog_index_local:	
+            url = './data/nuscenes'	
+        else:	
+            self._ui_dataset.visible = True	
+            return	
+
+        self._ui_dataset.visible = False	
+        self._ui_dataset.model.set_value(url)	
         return self._reload_dataset()
 
     def _on_dataset_changed(self, model) -> None:
@@ -251,12 +285,12 @@ class RGBLiDARVisualizerExtension(omni.ext.IExt):
         self._data_loader_url = url
 
         # Reload data loader
-        has_old_data_loader = self._data_loader is not None
+        has_old_data_loader = self._data_loader is not None	
         try:
             self._ui_dataset_status.text = 'Loading...'
             self._data_loader = load_dataset(
                 category=self._data_category,
-                url=self._data_loader_url,
+                url=self._data_loader_url
             )
             self._ui_dataset_status.text = f'Ok({self._data_loader!r})'
         except Exception as e:  # pylint: disable=broad-exception-caught
@@ -267,7 +301,7 @@ class RGBLiDARVisualizerExtension(omni.ext.IExt):
                 self._data_loader.checkout_dataset()
 
             # Reset all values
-            if not has_old_data_loader:
+            if not has_old_data_loader:	
                 self._reload_dataset_catalog()
             self._reload_scenes()
 
@@ -301,25 +335,54 @@ class RGBLiDARVisualizerExtension(omni.ext.IExt):
         # Load the USD file into the stage
         stage = omni.usd.get_context().get_stage()
         if stage is None:
-            warning('No active stage found.')
-            return
+            #warning('No active stage found.')
+            stage: Usd.Stage = Usd.Stage.CreateInMemory()
+            #return
 
         # Remove existing pointcloud prim if any
         # pylint: disable=no-member
         pointcloud_prim_path = Sdf.Path('/World/LiDARPointCloud')
-        if pointcloud_prim_path and stage.GetPrimAtPath(pointcloud_prim_path):
-            # Remove the existing prim
-            omni.kit.commands.execute(
-                'DeletePrims',
-                paths=[str(pointcloud_prim_path)],
-            )
+        pointcloud_prim = stage.GetPrimAtPath(pointcloud_prim_path)
+        """if pointcloud_prim.IsValid():
+            stage.RemovePrim(pointcloud_prim_path)"""
 
         # Reference the pointcloud USD file
-        pointcloud_prim = stage.DefinePrim(pointcloud_prim_path, 'Points')
+        if not pointcloud_prim.IsValid():
+            pointcloud_prim = stage.DefinePrim(pointcloud_prim_path, 'Points')
+        pointcloud_prim.GetReferences().ClearReferences()
         pointcloud_prim.GetReferences().AddReference(
             assetPath=url,
             primPath='/Root/PointCloud',
         )
 
+        if not pointcloud_prim.GetAttribute('xformOp:rotateXYZ'):
+            omni.kit.commands.execute('CreateDefaultXformOnPrimCommand',
+                prim_path=Sdf.Path('/World/LiDARPointCloud'),
+                stage=stage)
+        omni.kit.commands.execute('ChangePropertyCommand',
+            prop_path=Sdf.Path('/World/LiDARPointCloud.xformOp:rotateXYZ'),
+            value=Gf.Vec3f(-90, 0, 0),
+            prev=Gf.Vec3f(0, 0, 0))
+         
+
         # Focus the camera on the point cloud
         # self.focus_on_prim(pointcloud_prim_path)
+
+    async def cache_timestamp(self, timestamp, executor):
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(executor, self._data_loader.lookup_lidar_top, timestamp)
+
+    async def cache_timestamps_async(self, timestamps):
+        executor = ThreadPoolExecutor()
+        tasks = [self.cache_timestamp(ts, executor) for ts in timestamps]
+        await asyncio.gather(*tasks)
+        executor.shutdown(wait=True)
+
+    def sample_timestamps(self, lst, num_samples=100):
+        L = len(lst)
+        if L <= num_samples:
+            return lst
+        else:
+            indices = np.linspace(0, L - 1, num=num_samples, dtype=int)
+            sampled_list = [lst[idx] for idx in indices]
+            return sampled_list
